@@ -28,9 +28,15 @@ class TelegramBot:
         self._offset = 0
         self._running = False
         self._thread: threading.Thread | None = None
+        self._http = httpx.Client(
+            timeout=httpx.Timeout(connect=15.0, read=65.0, write=15.0, pool=15.0),
+        )
 
     def start(self) -> None:
-        httpx.post(f"{self.base_url}/deleteWebhook", json={"drop_pending_updates": False}, timeout=15)
+        self._http.post(
+            f"{self.base_url}/deleteWebhook",
+            json={"drop_pending_updates": False},
+        ).raise_for_status()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
@@ -38,6 +44,7 @@ class TelegramBot:
 
     def stop(self) -> None:
         self._running = False
+        self._http.close()
 
     def send(self, chat_id: str | int, text: str, reply_markup: dict | None = None) -> None:
         payload: dict = {
@@ -48,7 +55,7 @@ class TelegramBot:
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        response = httpx.post(f"{self.base_url}/sendMessage", json=payload, timeout=30)
+        response = self._http.post(f"{self.base_url}/sendMessage", json=payload)
         response.raise_for_status()
 
     def notify_startup(self, offers: list[RobuxOffer]) -> None:
@@ -87,10 +94,9 @@ class TelegramBot:
     def _poll_loop(self) -> None:
         while self._running:
             try:
-                response = httpx.get(
+                response = self._http.get(
                     f"{self.base_url}/getUpdates",
                     params={"offset": self._offset, "timeout": 30},
-                    timeout=40,
                 )
                 response.raise_for_status()
                 for update in response.json().get("result", []):
@@ -99,6 +105,12 @@ class TelegramBot:
                         self._handle_update(update)
                     except Exception:
                         log.exception("Telegram update handler failed")
+            except httpx.TimeoutException as exc:
+                log.warning("Telegram polling timeout, retrying: %s", exc)
+                time.sleep(3)
+            except httpx.HTTPError as exc:
+                log.warning("Telegram polling error, retrying: %s", exc)
+                time.sleep(3)
             except Exception:
                 log.exception("Telegram polling failed")
                 time.sleep(3)
@@ -161,10 +173,10 @@ class TelegramBot:
         payload = {"callback_query_id": callback_id}
         if text:
             payload["text"] = text
-        httpx.post(f"{self.base_url}/answerCallbackQuery", json=payload, timeout=15)
+        self._http.post(f"{self.base_url}/answerCallbackQuery", json=payload).raise_for_status()
 
     def _edit(self, chat_id: int, message_id: int, text: str, reply_markup: dict) -> None:
-        httpx.post(
+        self._http.post(
             f"{self.base_url}/editMessageText",
             json={
                 "chat_id": chat_id,
@@ -174,7 +186,6 @@ class TelegramBot:
                 "disable_web_page_preview": True,
                 "reply_markup": reply_markup,
             },
-            timeout=30,
         ).raise_for_status()
 
     def _main_keyboard(self) -> dict:
